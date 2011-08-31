@@ -190,8 +190,18 @@ fi
 }
 
 
-if "${REMOTE_REPOS:-}" ; then
-  echo "REMOTE_REPOS is set, ignoring request to generate local repository."
+
+if [ -n "${REMOTE_REPOS:-}" ] && $REMOTE_REPOS ; then
+  echo "Config variable 'REMOTE_REPOS' is set, ignoring request to use local repository."
+elif [ -n "${release:-}" ] && [ "$release" != "trunk" -a "$release" != "none" ] ; then
+  echo "Environment variable 'release' is set, running through release steps."
+  [ -d "/srv/repository/debian/release/${release}" ] || mkdir -p "/srv/repository/debian/release/${release}"
+  cp "${WORKSPACE}/binaries/"* "/srv/repository/debian/release/${release}/"
+  [ $? -eq 0 ] || bailout 1 "Failed to copy binary packages to release directory."
+  # TODO - automatically set up conf/incoming and conf/distributions for $release
+  # TODO - remove already registered binaries?!
+  sudo reprepro -v -b /srv/repository/ processincoming "${release}"
+  [ $? -eq 0 ] || bailout 1 "Failed to execute processincoming for release ${release}."
 else
   reprepro_wrapper
 fi
