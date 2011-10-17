@@ -193,7 +193,7 @@ fi
 
 if [ -n "${REMOTE_REPOS:-}" ] && $REMOTE_REPOS ; then
   echo "Config variable 'REMOTE_REPOS' is set, ignoring request to use local repository."
-elif [ -n "${release:-}" ] && [ "$release" != "trunk" -a "$release" != "none" ] ; then
+elif [ -n "${release:-}" ] && [ "$release" != "none" ] ; then
   echo "Environment variable 'release' is set, running through release steps."
   [ -d "/srv/repository/debian/release/${release}" ] || mkdir -p "/srv/repository/debian/release/${release}"
   cp "${WORKSPACE}/binaries/"* "/srv/repository/debian/release/${release}/"
