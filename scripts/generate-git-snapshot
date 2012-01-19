@@ -1,0 +1,161 @@
+#!/bin/sh
+
+set -x
+set -e
+set -u
+
+[ -n "${DEBEMAIL:-}" ] || DEBEMAIL="jenkins.grml.org Autobuilder <jenkins@grml.org>"
+export DEBEMAIL
+
+if [ ! -d source ] ; then
+  echo "Please run the script in the jenkins workspace." >&2
+  exit 1
+fi
+
+if [ -z "${BUILD_NUMBER:-}" ] ; then
+  echo "No BUILD_NUMBER defined, please run it in jenkins." >&2
+  exit 1
+fi
+
+echo "***  source package build phase ***"
+rm -f ./* || true
+
+cd source
+
+# support overriding git-dch options
+if [ -n "${DCH_OPTS:-}" ] ; then
+  echo "Found environment variable DCH_OPTS, set to ${DCH_OPTS}"
+else
+  DCH_OPTS="-S --multimaint-merge --ignore-branch"
+  echo "Using default git-dch options (${DCH_OPTS})"
+fi
+
+# support overriding extra options for git-dch
+if [ -n "${DCH_EXTRA_OPTS:-}" ] ; then
+  echo "Found environment variable DCH_EXTRA_OPTS, set to ${DCH_EXTRA_OPTS}"
+else
+  # support customizing the version number from outside
+  if [ -n "${distribution:-}" ] ; then
+    echo "Found environment variable distribution, set to $distribution"
+    DCH_EXTRA_OPTS="-N $(increase-version-number $(dpkg-parsechangelog --count 1 | awk '/Version/ {print $2}'))~${BUILD_NUMBER}+${distribution}"
+  else
+    DCH_EXTRA_OPTS="--snapshot-number=${BUILD_NUMBER}"
+  fi
+  echo "Using extra git-dch options (${DCH_EXTRA_OPTS})"
+fi
+
+branch_checkout() {
+  [ -n "${1:-}" ] || return 1
+
+  local BRANCH="$1"
+
+  if git branch -a | grep -q "remotes/origin/${BRANCH}" ; then
+    git branch -D "${BRANCH}" || true
+    git checkout -b "${BRANCH}" "remotes/origin/${BRANCH}"
+  else
+    echo "NOTE: branch $BRANCH does not exist, ignoring request to checkout therefore."
+  fi
+}
+
+identify_latest_change() {
+  # debian/changelog might be a symlink (e.g. because debian points to
+  # pkg/debian), so make sure we don't access a non-existing file
+  git checkout -- $(readlink -f debian/changelog)
+  local OLD_VERSION=$(dpkg-parsechangelog | awk '/^Version: / {print $2}')
+
+  local tag=$(git describe $(git rev-list --tags='[^ju]*' --max-count=1 HEAD))
+  local last_merge=$(git describe $(git rev-list --all --merges --max-count=1 HEAD))
+  local since=${tag}
+
+  if [ -n "$last_merge" ] ; then
+    local m_date=$(git log ${last_merge} --pretty="format:%at" -1)
+    local t_date=$(git log ${tag} --pretty="format:%at" -1)
+    if [ ${m_date} -gt ${t_date} ] ; then
+      local since=${last_merge}
+    fi
+  fi
+
+  echo "Last tag / merge seems to be $since"
+  git-dch -s "${since}" $DCH_OPTS $DCH_EXTRA_OPTS
+
+  local NEW_VERSION=$(dpkg-parsechangelog | awk '/^Version: / {print $2}')
+
+  if dpkg --compare-versions "$NEW_VERSION" lt "$OLD_VERSION" ; then
+    echo "Calculated version is older than last release, falling back to auto mode."
+    # debian/changelog might be a symlink (e.g. because debian points to
+    # pkg/debian), so make sure we don't access a non-existing file
+    git checkout -- $(readlink -f debian/changelog)
+    git-dch --auto $DCH_OPTS $DCH_EXTRA_OPTS
+  fi
+}
+
+git_dch_auto() {
+  git-dch --auto $DCH_OPTS $DCH_EXTRA_OPTS
+}
+
+git_tag_build() {
+  git checkout "${tag}"
+
+  local VERSION="$(dpkg-parsechangelog | awk '/^Version: / {print $2}')"
+
+  if [ -n "${distribution:-}" ] ; then
+    echo "Distribution found. Adding distribution specific version."
+    dch -b -v "${VERSION}~${distribution}+${BUILD_NUMBER}" \
+      "Autobuild for ${distribution} via jenkins-debian-glue."
+  else
+    dch -v "${VERSION}+${BUILD_NUMBER}" \
+      "Autobuild via jenkins-debian-glue."
+  fi
+}
+
+# Clean up any unexpected local changes
+#git reset --hard HEAD
+
+# git-buildpackage's --git-upstream-branch defaults to "upstream",
+# so try to make sure it's available if it exists
+if [ -n "${branch:-}" ] && [ "${branch:-}" != "upstream" ] ; then
+  branch_checkout upstream
+fi
+
+# Drop residual files
+#git clean -xfd
+
+git checkout "$GIT_COMMIT"
+
+if [ -n "${tag:-}" ] ; then
+  echo "Tag parameter found, using dch for changelog generation."
+  git_tag_build
+elif [ "${1:-}" = "auto" ] ; then
+  echo "Using git-dch with auto mode."
+  git_dch_auto
+elif [ -r debian/gbp.conf ] ; then
+  echo "Found debian/gbp.conf, using git-dch with auto mode."
+  git_dch_auto
+else
+  echo "Trying to identify latest tag / merge..."
+
+  if ! git describe $(git rev-list --tags='[^ju]*' --max-count=1 HEAD) >/dev/null ; then
+    echo "Failed to identify latest change, falling back to auto mode."
+    git_dch_auto
+  else
+    identify_latest_change
+  fi
+fi
+
+debchange --release ""
+
+if ! git-buildpackage -tc --git-ignore-new -S -us -uc --git-verbose ; then
+  echo "git-buildpackage did not work, trying dpkg-source"
+  ( cd .. ; dpkg-source -i\.git -b source )
+fi
+
+# revert to original debian/changelog to avoid merge conflicts
+git checkout -- debian/changelog
+
+# needed for deploying artifacts
+mkdir -p ${JENKINS_HOME}/userContent/${JOB_NAME}/
+
+echo "Cleaning up ${JENKINS_HOME}/userContent/${JOB_NAME} to get rid of possibly outdated data"
+rm -f "${JENKINS_HOME}/userContent/${JOB_NAME}/"*
+
+# vim:foldmethod=marker ts=2 ft=sh ai expandtab sw=2

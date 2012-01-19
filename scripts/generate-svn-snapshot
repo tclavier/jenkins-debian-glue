@@ -68,28 +68,48 @@ build_snapshot() {
 
   DISTRIBUTION=$(dpkg-parsechangelog --count 1 | awk '/^Distribution/ {print $2}')
 
+  TIMESTAMP=$(date +%s) # seconds since 1970-01-01 00:00:00 UTC, ensuring version gets always newer...
+
   if [ "$DISTRIBUTION" = "UNRELEASED" ] ; then
     # we do NOT raise the version number, if we detect an unreleased version
-    SNAPSHOT_VERSION="${PREVIOUS_VERSION}~${BUILD_NUMBER}.svn${SINCE_REVISION}"
+    SNAPSHOT_VERSION="${PREVIOUS_VERSION}~${TIMESTAMP}.svn${SVN_REVISION}.${BUILD_NUMBER}"
   else
     # calculate new snapshot version
-    SNAPSHOT_VERSION="$(increase-version-number "$PREVIOUS_VERSION")~${BUILD_NUMBER}.svn${SVN_REVISION}"
+    SNAPSHOT_VERSION="$(increase-version-number "$PREVIOUS_VERSION")~${TIMESTAMP}.svn${SVN_REVISION}.${BUILD_NUMBER}"
   fi
 
   # generate changelog
-  SVN_CHANGELOG=$(mktemp)
+  SVN_CHANGELOG_ORIG=$(mktemp)
+  SVN_CHANGELOG_EDIT=$(mktemp)
   # build GNU like changelog with svn2cl as helper tool
   # timeout after 15 seconds without progress, we might be running into e.g.
   # "xsltApplyXSLTTemplate: A potential infinite template recursion was detected."
-  if ! timeout -k 16 16 svn2cl --reparagraph --stdout --include-rev -r HEAD:$SINCE_REVISION > $SVN_CHANGELOG ; then
-    echo '  * Sorry, generating changelog using svn2cl failed. :(' > $SVN_CHANGELOG
+  if ! timeout -k 16 16 svn2cl --reparagraph --stdout --include-rev -r HEAD:$SINCE_REVISION > "$SVN_CHANGELOG_ORIG" ; then
+    echo '  * Sorry, generating changelog using svn2cl failed. :(
+    Make sure the svn2cl command works on the jenkins host.
+    For example validating server certificates is a common error.
+' > "$SVN_CHANGELOG_ORIG"
   fi
 
+  ## disclaimer: use separate sed calls to make it easier to adjust if necessary
   # reduce changelog to just the first line of the commit message
-  sed -in '/^\t*\s*\* \[r/,/^\t*\s*$/p' "$SVN_CHANGELOG"
+  sed -n '/^\t*\s*\* \[r/,/^\t*\s*$/p' "$SVN_CHANGELOG_ORIG" > "$SVN_CHANGELOG_EDIT"
 
-  # shorten tabs at beginning of lines
-  sed -i 's/\t/  /' $SVN_CHANGELOG
+  # get rid of author information that might be present from git-svn users
+  sed -i '/^\t\s\sFrom: /d' "$SVN_CHANGELOG_EDIT"
+
+  # replace tabs at beginning of lines with two spaces
+  sed -i 's/^\t/  /' "$SVN_CHANGELOG_EDIT"
+
+  # get rid of lines with just 4 space chars only
+  sed -i '/^    $/d' "$SVN_CHANGELOG_EDIT"
+
+  # get rid of empty lines
+  sed -i '/^$/d' "$SVN_CHANGELOG_EDIT"
+
+  # get rid of of the timestamp lines, looking like:
+  # 2011-12-02 21:25  mprokop
+  sed -ri '/^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}/d' "$SVN_CHANGELOG_EDIT"
 
   cat > debian/changelog.new << EOF
 $PACKAGE ($SNAPSHOT_VERSION) unstable; urgency=low
@@ -98,9 +118,10 @@ $PACKAGE ($SNAPSHOT_VERSION) unstable; urgency=low
 
 EOF
 
-  cat $SVN_CHANGELOG >> debian/changelog.new
+  cat "$SVN_CHANGELOG_EDIT" >> debian/changelog.new
 
   cat >> debian/changelog.new << EOF
+
  -- $DEBEMAIL  $(date -u -R)
 
 EOF
@@ -110,7 +131,7 @@ EOF
 
   # finally install new changelog
   mv debian/changelog.new debian/changelog
-  rm -f "$SVN_CHANGELOG"
+  rm -f "$SVN_CHANGELOG_ORIG" "$SVN_CHANGELOG_EDIT"
 }
 
 case "${branch:-}" in
@@ -119,10 +140,29 @@ case "${branch:-}" in
 esac
 
 cd $ORIG_DIR
-dpkg-source --tar-ignore=\.svn -b source/${branch:-}
+
+debian_only="$(svn propget mergeWithUpstream source/${branch:-}/debian)"
+
+if [ "${debian_only:-}" = "1" ] ; then
+  (
+    cd "source/${branch:-}"
+    echo "mergeWithUpstream detected, using svn-buildpackage to create source package"
+    svn-buildpackage --svn-download-orig -S \
+     --svn-builder 'dpkg-buildpackage' -d \
+     --svn-move-to="${ORIG_DIR}" --svn-dont-purge -uc -us \
+     --svn-ignore-new -rfakeroot
+  )
+else
+  dpkg-source --tar-ignore=\.svn -b source/${branch:-}
+fi
 
 # revert to original debian/changelog to avoid highly increasing version numbers with each build
 ( cd source/${branch:-} ; svn revert debian/changelog )
 
 # needed for deploying artifacts
-mkdir -p ${JENKINS_HOME}/userContent/${JOB_NAME}/
+mkdir -p "${JENKINS_HOME}/userContent/${JOB_NAME}/"
+
+echo "*** Cleaning up ${JENKINS_HOME}/userContent/${JOB_NAME} to get rid of possibly outdated data ***"
+rm -f "${JENKINS_HOME}/userContent/${JOB_NAME}/"*
+
+# vim:foldmethod=marker ts=2 ft=sh ai expandtab sw=2

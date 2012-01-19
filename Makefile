@@ -1,6 +1,6 @@
 PREFIX := /usr
 
-PROGRAMS := build-and-provide-package generate-git-snapshot generate-local-repository generate-reprepro-codename generate-svn-snapshot increase-version-number
+PROGRAMS := scripts/*
 
 build:
 	tests/increase-version-number
@@ -13,5 +13,15 @@ install: $(scripts)
 
 	mkdir -p $(DESTDIR)/usr/share/jenkins-debian-glue/examples/
 	install -m 0664 examples/* $(DESTDIR)/usr/share/jenkins-debian-glue/examples/
+
+deploy:
+	fab all
+
+clean:
+	rm -f fabfile.pyc
+	# avoid recursion via debian/rules clean, so manually rm:
+	rm -f debian/files debian/jenkins-debian-glue.debhelper.log
+	rm -f debian/jenkins-debian-glue.substvars
+	rm -rf debian/jenkins-debian-glue/
 
 .PHONY: build install
